@@ -86,21 +86,33 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        FrameView {
-            id: frameView
+        // The frame view shows the picture as a texture of the scene
+        // graph and does not paint a background of its own, so the black
+        // background is a rectangle behind it.
+        Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            player: videoPlayer
 
-            Label {
-                anchors.centerIn: parent
-                visible: videoPlayer.errorString !== ""
-                         || videoPlayer.source === ""
-                color: videoPlayer.errorString !== "" ? "tomato" : "gray"
-                font.pixelSize: 20
-                text: videoPlayer.errorString !== ""
-                      ? videoPlayer.errorString
-                      : "Open a video to start"
+            Rectangle {
+                anchors.fill: parent
+                color: "black"
+            }
+
+            FrameView {
+                id: frameView
+                anchors.fill: parent
+                player: videoPlayer
+
+                Label {
+                    anchors.centerIn: parent
+                    visible: videoPlayer.errorString !== ""
+                             || videoPlayer.source === ""
+                    color: videoPlayer.errorString !== "" ? "tomato" : "gray"
+                    font.pixelSize: 20
+                    text: videoPlayer.errorString !== ""
+                          ? videoPlayer.errorString
+                          : "Open a video to start"
+                }
             }
         }
 

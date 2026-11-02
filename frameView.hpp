@@ -1,21 +1,31 @@
 #ifndef FRAMEVIEW_HPP
 #define FRAMEVIEW_HPP
 
-#include <QQuickPaintedItem>
-#include <QPainter>
+#include <QQuickItem>
 #include <QPointer>
 #include <QImage>
 
 #include "videoPlayer.hpp"
 
 /*!
- * \brief QML item that paints the current frame of a VideoPlayer,
+ * \brief QML item that shows the current frame of a VideoPlayer,
  *        scaled to fit while keeping the aspect ratio.
  *
- * It lives in the GUI thread and only reads frames that VideoPlayer has
- * already handed over to the GUI thread, so it needs no locking.
+ * The picture is put on the screen as a texture of the scene graph, not
+ * painted with QPainter. Scaling a picture with QPainter costs a lot of
+ * processor time: every picture is scaled on the processor and then
+ * copied to the graphics card. With a texture the graphics card does
+ * the scaling, and the processor only copies the picture once.
+ *
+ * Threading model:
+ * - updatePaintNode() runs on the render thread of the scene graph,
+ *   while the GUI thread is blocked in the sync phase. Reading the
+ *   current frame there is safe, because the frame is only changed by
+ *   the GUI thread, which is busy at that moment.
+ * - The picture is taken over as an image, so the render thread works
+ *   on its own copy and never touches the buffer of the player.
  */
-class FrameView : public QQuickPaintedItem
+class FrameView : public QQuickItem
 {
     Q_OBJECT
     Q_PROPERTY( VideoPlayer *player READ player WRITE setPlayer
@@ -40,16 +50,30 @@ public:
     void setPlayer( VideoPlayer *_player );
 
     /*!
-     * \brief Paints the current frame letterboxed on a black background.
-     * \param _painter Painter provided by the scene graph.
+     * \brief Builds the node that shows the current picture.
+     * \param _node Node of the previous frame, may be nullptr.
+     * \return The node of this frame.
      */
-    void paint( QPainter *_painter ) override;
+    QSGNode *updatePaintNode( QSGNode *_node,
+                              UpdatePaintNodeData *_data ) override;
 
 signals:
     void playerChanged();
 
 private:
+    /*!
+     * \brief Returns the rectangle the picture is shown in.
+     *
+     * The picture keeps its aspect ratio and is centred in the item.
+     * \param _pictureSize Size of the picture.
+     * \return The rectangle inside the item.
+     */
+    QRectF pictureRect( const QSizeF &_pictureSize ) const;
+
     QPointer<VideoPlayer> m_player;
+    // The picture of the last frame, kept so that the node can be built
+    // again after a change of the item.
+    QImage m_image;
 };
 
 #endif // FRAMEVIEW_HPP
