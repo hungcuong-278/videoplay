@@ -1,0 +1,19 @@
+# The sources are edited on Windows and on Linux. The line endings are
+# kept the same in the repository, so a diff never shows the whole file.
+* text=auto eol=lf
+
+*.cpp text
+*.hpp text
+*.pro text
+*.qrc text
+*.qml text
+*.md text
+*.py text
+
+# Binary files that may show up next to the sources.
+*.mp4 binary
+*.ts binary
+*.mkv binary
+*.avi binary
+*.vmpidx binary
+*.csv text eol=lf
