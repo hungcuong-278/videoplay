@@ -3,6 +3,8 @@
 
 #include <QObject>
 #include <QFutureWatcher>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QString>
 #include <QStringList>
 

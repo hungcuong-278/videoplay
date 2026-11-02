@@ -1,5 +1,7 @@
 #include "metadataStore.hpp"
 
+#include <QtMath>
+
 const char *const MetadataStore::ID_COLUMN_NAME = "imageId";
 
 MetadataStore::MetadataStore( QObject *_parent )

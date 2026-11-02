@@ -7,7 +7,6 @@
 #include <QMetaObject>
 #include <QMutexLocker>
 #include <QStandardPaths>
-
 #include <cstring>
 
 #include <gst/gst.h>
