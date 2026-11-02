@@ -12,6 +12,7 @@
 #include "keyframeIndex.hpp"
 #include "videoCutter.hpp"
 #include "cutController.hpp"
+#include "panTiltGraph.hpp"
 
 /*!
  * \brief Converts a command-line path to a local file URL.
@@ -31,6 +32,7 @@ int main( int argc, char *argv[] )
     QGuiApplication app( argc, argv );
 
     qmlRegisterType<FrameView>( "VideoTool", 1, 0, "FrameView" );
+    qmlRegisterType<PanTiltGraph>( "VideoTool", 1, 0, "PanTiltGraph" );
 
     // Declared before the engine so they are destroyed after it: QML keeps
     // references to them until the engine is gone.

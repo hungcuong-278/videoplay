@@ -193,6 +193,56 @@ ApplicationWindow {
                 anchors.fill: parent
                 spacing: 6
 
+                // Graph of the pan and the tilt of the metadata. The
+                // frame on screen is marked, so the movement of the
+                // camera can be followed while the video is played.
+                PanTiltGraph {
+                    id: panTilt
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 110
+                    visible: metadata.loaded
+
+                    // The values change when a new table is loaded.
+                    onVisibleChanged: graphValuesChanged()
+                    onWidthChanged: graphValuesChanged()
+
+                    property var panValues: []
+                    property var tiltValues: []
+
+                    function graphValuesChanged() {
+                        var data = metadata.panTiltData
+                        if (data && data.length >= 2) {
+                            panValues = data[0]
+                            tiltValues = data[1]
+                            setValues(panValues, tiltValues)
+                        }
+                    }
+
+                    onPanValuesChanged: setValues(panValues, tiltValues)
+                    onTiltValuesChanged: setValues(panValues, tiltValues)
+
+                    // The mark follows the frame on screen, so the row of
+                    // the table that belongs to it is known.
+                    function updatePosition() {
+                        if (row.found && panValues.length > 0)
+                            setPosition(row.row)
+                        else
+                            setPosition(-1)
+                    }
+
+                    Connections {
+                        target: metadata
+                        onPanTiltChanged: panTilt.graphValuesChanged()
+                    }
+
+                    // The mark follows the frame on screen, so the row of
+                    // the table that belongs to it is known.
+                    Connections {
+                        target: videoPlayer
+                        onFrameReady: panTilt.updatePosition()
+                    }
+                }
+
                 // Seek bar. While dragging, fast keyframe previews (one
                 // decoded picture each, tens of ms, whatever the length of
                 // the video); on release, an accurate seek to the exact

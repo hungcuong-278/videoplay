@@ -10,6 +10,7 @@
 #include <QSharedPointer>
 #include <QUrl>
 #include <QVariantMap>
+#include <QVector>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include "metadataTable.hpp"
@@ -41,6 +42,8 @@ class MetadataStore : public QObject
                 NOTIFY statsChanged )
     Q_PROPERTY( quint64 missingRowFrames READ missingRowFrames
                 NOTIFY statsChanged )
+    Q_PROPERTY( QVariantList panTiltData READ panTiltData
+                NOTIFY panTiltChanged )
 
 public:
     /*!
@@ -97,6 +100,25 @@ public:
     QSharedPointer<const MetadataTable> table() const;
 
     /*!
+     * \brief Returns the pan and tilt of every row, for the graph.
+     *
+     * The map holds "pan" and "tilt", each a list of numbers. A value is
+     * NaN when the row has no number in that column.
+     */
+    QVariantList panTiltData() const;
+
+    /*!
+     * \brief Returns the pan and tilt of every row, for the graph.
+     *
+     * The values are in the order of the rows. A value is NaN when the
+     * row has no number in that column.
+     * \param pan_ Receives the pan values.
+     * \param tilt_ Receives the tilt values.
+     */
+    void panTiltValues( QVector<double> &pan_,
+                        QVector<double> &tilt_ ) const;
+
+    /*!
      * \brief Writes a copy of the table with only the given rows.
      *
      * The rows are written in the order of the given ids, so the new
@@ -123,6 +145,7 @@ signals:
     void loadingChanged();
     void tableChanged();
     void statsChanged();
+    void panTiltChanged();
 
 private:
     typedef QSharedPointer<MetadataTable> TablePointer;

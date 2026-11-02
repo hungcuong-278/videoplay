@@ -13,7 +13,8 @@ HEADERS += \
     nalParser.hpp \
     keyframeIndex.hpp \
     videoCutter.hpp \
-    cutController.hpp
+    cutController.hpp \
+    panTiltGraph.hpp
 
 SOURCES += \
     main.cpp \
@@ -24,6 +25,7 @@ SOURCES += \
     nalParser.cpp \
     keyframeIndex.cpp \
     videoCutter.cpp \
-    cutController.cpp
+    cutController.cpp \
+    panTiltGraph.cpp
 
 RESOURCES += qml.qrc

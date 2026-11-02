@@ -139,9 +139,64 @@ QSharedPointer<const MetadataTable> MetadataStore::table() const
     return m_table;
 }
 
-bool MetadataStore::writeRows( const QString &_targetPath,
-                               const QStringList &_ids ) const
+QVariantList MetadataStore::panTiltData() const
 {
+    QVariantList result;
+    QVector<double> pan;
+    QVector<double> tilt;
+    panTiltValues( pan, tilt );
+    result.append( QVariant::fromValue( pan ) );
+    result.append( QVariant::fromValue( tilt ) );
+    return result;
+}
+
+void MetadataStore::panTiltValues( QVector<double> &pan_,
+                                  QVector<double> &tilt_ ) const
+{
+    pan_.clear();
+    tilt_.clear();
+    if ( m_table.isNull() )
+    {
+        return;
+    }
+    const int count = m_table->lines.size();
+    pan_.reserve( count );
+    tilt_.reserve( count );
+
+    for ( int i = 0; i < count; ++i )
+    {
+        QList<QByteArray> fields = splitLine( m_table->lines.at( i ) );
+        double pan = qQNaN();
+        double tilt = qQNaN();
+        if ( m_table->panColumn >= 0
+             && m_table->panColumn < fields.size() )
+        {
+            bool ok = false;
+            pan = QString::fromUtf8( fields.at( m_table->panColumn ) )
+                      .toDouble( &ok );
+            if ( !ok )
+            {
+                pan = qQNaN();
+            }
+        }
+        if ( m_table->tiltColumn >= 0
+             && m_table->tiltColumn < fields.size() )
+        {
+            bool ok = false;
+            tilt = QString::fromUtf8( fields.at( m_table->tiltColumn ) )
+                       .toDouble( &ok );
+            if ( !ok )
+            {
+                tilt = qQNaN();
+            }
+        }
+        pan_.append( pan );
+        tilt_.append( tilt );
+    }
+}
+
+bool MetadataStore::writeRows( const QString &_targetPath,
+                               const QStringList &_ids ) const{
     if ( m_table.isNull() )
     {
         return false;
@@ -268,6 +323,7 @@ void MetadataStore::onLoadFinished()
     // a listener of loadingChanged() already sees the final state.
     m_loading = false;
     emit tableChanged();
+    emit panTiltChanged();
     emit loadingChanged();
 }
 
