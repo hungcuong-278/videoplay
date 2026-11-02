@@ -97,6 +97,14 @@ public:
     KeyframeIndex *keyframeIndex() const;
 
     /*!
+     * \brief Reads the duration again and tells the interface.
+     *
+     * The keyframe index gives the exact duration of a file, so the
+     * duration is read again when the index has new results.
+     */
+    Q_INVOKABLE void refreshDuration();
+
+    /*!
      * \brief Turns the use of the keyframe index on or off.
      *
      * The index makes the accurate seeks of a file without a keyframe

@@ -55,6 +55,11 @@ int main( int argc, char *argv[] )
     // seek would throw away anyway.
     player.setKeyframeIndex( &keyframes );
 
+    // The index gives the exact duration of the file, so the handle of
+    // the slider does not drift on a file without a duration field.
+    QObject::connect( &keyframes, &KeyframeIndex::keyframeChanged,
+                      &player, [&player]() { player.refreshDuration(); } );
+
     // The cut controller marks the frames on screen and cuts the video
     // and the metadata table.
     cut.setPlayer( &player );

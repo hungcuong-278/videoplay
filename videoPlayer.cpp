@@ -167,6 +167,11 @@ KeyframeIndex *VideoPlayer::keyframeIndex() const
     return m_keyframeIndex;
 }
 
+void VideoPlayer::refreshDuration()
+{
+    updateDuration();
+}
+
 void VideoPlayer::setUseKeyframeIndex( bool _enabled )
 {
     if ( _enabled == m_useKeyframeIndex )
@@ -574,6 +579,25 @@ void VideoPlayer::updatePosition()
                                      &position ) )
     {
         qint64 positionMs = position / GST_MSECOND;
+        // The position of the pipeline can be a little ahead of the
+        // picture on screen, and it can be behind it when the video is
+        // paused. The time of the picture is the truth, so it is used
+        // when the pipeline is not playing.
+        if ( !m_playing && m_currentFrameTime >= 0 )
+        {
+            positionMs = m_currentFrameTime;
+        }
+        // A container without an index sometimes reports a position
+        // that is past the end of the file, which would move the handle
+        // of the slider past the end.
+        if ( m_duration > 0 && positionMs > m_duration )
+        {
+            positionMs = m_duration;
+        }
+        if ( positionMs < 0 )
+        {
+            positionMs = 0;
+        }
         if ( positionMs != m_position )
         {
             m_position = positionMs;
@@ -609,6 +633,18 @@ void VideoPlayer::updateDuration()
         if ( exact > 0 )
         {
             durationMs = exact;
+        }
+        else if ( m_keyframeIndex->isScanning() )
+        {
+            // The scan has not reached the end of the file yet, but it
+            // knows how far it has read. That time is a better lower
+            // bound than the end of the last picture, because the
+            // estimate of the demuxer is often too short.
+            qint64 known = m_keyframeIndex->lastKnownTimeMs();
+            if ( known > 0 )
+            {
+                durationMs = qMax( durationMs, known );
+            }
         }
     }
 
