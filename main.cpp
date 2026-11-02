@@ -10,6 +10,8 @@
 #include "frameView.hpp"
 #include "metadataStore.hpp"
 #include "keyframeIndex.hpp"
+#include "videoCutter.hpp"
+#include "cutController.hpp"
 
 /*!
  * \brief Converts a command-line path to a local file URL.
@@ -35,6 +37,8 @@ int main( int argc, char *argv[] )
     VideoPlayer player;
     MetadataStore metadata;
     KeyframeIndex keyframes;
+    VideoCutter cutter;
+    CutController cut;
 
     // Both objects live in the GUI thread, so these are direct calls.
     QObject::connect( &player, &VideoPlayer::frameReady, &metadata,
@@ -48,6 +52,11 @@ int main( int argc, char *argv[] )
     // The player uses the index to skip the pictures that an accurate
     // seek would throw away anyway.
     player.setKeyframeIndex( &keyframes );
+
+    // The cut controller marks the frames on screen and cuts the video
+    // and the metadata table.
+    cut.setPlayer( &player );
+    cut.setMetadata( &metadata );
 
     // Every new file gets a new index. The scan runs in the background,
     // so the video can be opened and played right away.
@@ -67,6 +76,8 @@ int main( int argc, char *argv[] )
     engine.rootContext()->setContextProperty( "videoPlayer", &player );
     engine.rootContext()->setContextProperty( "metadata", &metadata );
     engine.rootContext()->setContextProperty( "keyframes", &keyframes );
+    engine.rootContext()->setContextProperty( "cutter", &cutter );
+    engine.rootContext()->setContextProperty( "cut", &cut );
     engine.load( QUrl( QStringLiteral( "qrc:/qml/main.qml" ) ) );
     if ( engine.rootObjects().isEmpty() )
     {

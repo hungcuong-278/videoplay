@@ -96,6 +96,18 @@ public:
      */
     QSharedPointer<const MetadataTable> table() const;
 
+    /*!
+     * \brief Writes a copy of the table with only the given rows.
+     *
+     * The rows are written in the order of the given ids, so the new
+     * file holds exactly the frames of the cut. A row that is not in
+     * the table is skipped.
+     * \param _targetPath Path of the new CSV file.
+     * \param _ids Ids of the frames that belong to the cut.
+     * \return True when the file was written.
+     */
+    bool writeRows( const QString &_targetPath, const QStringList &_ids ) const;
+
     bool isLoading() const;
     bool isLoaded() const;
     QString path() const;

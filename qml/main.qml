@@ -91,6 +91,18 @@ ApplicationWindow {
         onActivated: root.showOverlay = !root.showOverlay
     }
 
+    // Mark the frame on screen as the start of the cut.
+    Shortcut {
+        sequence: "I"
+        onActivated: cut.markIn()
+    }
+
+    // Mark the frame on screen as the end of the cut.
+    Shortcut {
+        sequence: "U"
+        onActivated: cut.markOut()
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -294,7 +306,6 @@ ApplicationWindow {
                         currentIndex: rates.indexOf(1.0)
                         onActivated: videoPlayer.setRate(rates[index])
                     }
-
                     Label {
                         font.family: "monospace"
                         // Time of the frame on screen, from its timestamp;
@@ -332,6 +343,81 @@ ApplicationWindow {
                         font.family: "monospace"
                         text: "no ID: " + videoPlayer.unreadableFrames
                     }
+                }
+
+                // Cutting a part out of the video. The stream is copied
+                // without encoding, so the pictures stay the same and the
+                // barcode of a frame stays readable. The metadata file of
+                // the cut holds exactly the rows of the frames that are
+                // really in the new file.
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Button {
+                        text: "Mark In"
+                        focusPolicy: Qt.NoFocus
+                        enabled: videoPlayer.frameId >= 0 && !cut.running
+                        onClicked: cut.markIn()
+                    }
+
+                    Label {
+                        font.family: "monospace"
+                        color: cut.hasMarkIn ? "seagreen" : "gray"
+                        text: cut.hasMarkIn
+                              ? "IN  " + padId(cut.markInId) + "  "
+                                + formatTime(cut.markInMs)
+                              : "IN  ---"
+                    }
+
+                    Button {
+                        text: "Mark Out"
+                        focusPolicy: Qt.NoFocus
+                        enabled: videoPlayer.frameId >= 0 && !cut.running
+                        onClicked: cut.markOut()
+                    }
+
+                    Label {
+                        font.family: "monospace"
+                        color: cut.hasMarkOut ? "seagreen" : "gray"
+                        text: cut.hasMarkOut
+                              ? "OUT " + padId(cut.markOutId) + "  "
+                                + formatTime(cut.markOutMs)
+                              : "OUT ---"
+                    }
+
+                    Button {
+                        text: "Clear"
+                        focusPolicy: Qt.NoFocus
+                        enabled: !cut.running
+                        onClicked: cut.clearMarks()
+                    }
+
+                    Button {
+                        text: "Cut"
+                        focusPolicy: Qt.NoFocus
+                        enabled: cut.hasMarkIn && cut.hasMarkOut && !cut.running
+                        onClicked: cut.startCut()
+                    }
+
+                    ProgressBar {
+                        Layout.preferredWidth: 120
+                        from: 0
+                        to: 100
+                        value: cut.progress
+                        visible: cut.running
+                    }
+
+                    Label {
+                        font.family: "monospace"
+                        color: "gray"
+                        text: cut.running ? cut.statusText
+                             : (cut.resultVideoPath !== ""
+                                ? "Cut written: " + cut.keptFrames + " frames"
+                                : "")
+                    }
+
+                    Item { Layout.fillWidth: true }
                 }
 
                 RowLayout {

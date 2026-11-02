@@ -139,6 +139,53 @@ QSharedPointer<const MetadataTable> MetadataStore::table() const
     return m_table;
 }
 
+bool MetadataStore::writeRows( const QString &_targetPath,
+                               const QStringList &_ids ) const
+{
+    if ( m_table.isNull() )
+    {
+        return false;
+    }
+    QFile file( _targetPath );
+    if ( !file.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
+    {
+        return false;
+    }
+    // The header is kept byte for byte, so the new file has the same
+    // columns as the original.
+    file.write( m_table->headerLine );
+    file.write( "\n" );
+
+    int written = 0;
+    for ( const QString &id : _ids )
+    {
+        bool ok = false;
+        qint64 value = id.toLongLong( &ok );
+        if ( !ok )
+        {
+            continue;
+        }
+        QHash<qint64, int>::const_iterator it =
+            m_table->rowById.constFind( value );
+        if ( it == m_table->rowById.constEnd() )
+        {
+            continue;
+        }
+        // The row is kept byte for byte, so nothing of the metadata is
+        // changed by the cut.
+        file.write( m_table->lines.at( it.value() ) );
+        file.write( "\n" );
+        ++written;
+    }
+    if ( written == 0 )
+    {
+        file.close();
+        QFile::remove( _targetPath );
+        return false;
+    }
+    return file.flush();
+}
+
 bool MetadataStore::isLoading() const
 {
     return m_loading;

@@ -11,7 +11,9 @@ HEADERS += \
     metadataTable.hpp \
     metadataStore.hpp \
     nalParser.hpp \
-    keyframeIndex.hpp
+    keyframeIndex.hpp \
+    videoCutter.hpp \
+    cutController.hpp
 
 SOURCES += \
     main.cpp \
@@ -20,6 +22,8 @@ SOURCES += \
     barcodeReader.cpp \
     metadataStore.cpp \
     nalParser.cpp \
-    keyframeIndex.cpp
+    keyframeIndex.cpp \
+    videoCutter.cpp \
+    cutController.cpp
 
 RESOURCES += qml.qrc
