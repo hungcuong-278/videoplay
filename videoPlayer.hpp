@@ -22,6 +22,7 @@
 #include <atomic>
 
 #include "barcodeReader.hpp"
+#include "nalParser.hpp"
 
 /*!
  * \brief Plays any video supported by the installed GStreamer plugins and
@@ -246,13 +247,6 @@ private:
         std::atomic<int> dropped;
     };
 
-    enum CodecKind
-    {
-        CODEC_OTHER = 0,
-        CODEC_H264 = 1,
-        CODEC_H265 = 2
-    };
-
     enum WaitMode
     {
         WAIT_NONE = 0,
@@ -268,8 +262,6 @@ private:
                                              gpointer _data );
     static void freeDecoderGate( gpointer _data );
     static void configureGate( DecoderGate *_gate, GstCaps *_caps );
-    static int pictureNalType( const DecoderGate *_gate,
-                               GstBuffer *_buffer );
 
     // Give up waiting after this many dropped buffers: a stream that
     // never marks keyframes must still play.

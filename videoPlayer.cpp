@@ -928,7 +928,7 @@ void VideoPlayer::onDeepElementAdded( GstBin *_bin, GstBin *_subBin,
     gate->player = static_cast<VideoPlayer *>( _data );
     gate->decoder = _element;
     gate->hasOutputCorrupt = hasOutputCorrupt;
-    gate->codec = CODEC_OTHER;
+    gate->codec = NalParser::CODEC_OTHER;
     gate->lengthSize = 0;
     gate->waitMode = WAIT_NONE;
     gate->dropped = 0;
@@ -1007,11 +1007,13 @@ GstPadProbeReturn VideoPlayer::onDecoderInput( GstPad *_pad,
     }
 
     int codec = gate->codec;
-    int type = ( codec != CODEC_OTHER ) ? pictureNalType( gate, buffer ) : -1;
-    bool h265 = ( codec == CODEC_H265 );
-    // H.264: 5 = IDR. H.265: 16..21 = IRAP (BLA, IDR, CRA), 8..9 = RASL
-    bool irap = h265 ? ( type >= 16 && type <= 21 ) : ( type == 5 );
-    bool rasl = h265 && ( type == 8 || type == 9 );
+    int type = ( codec != NalParser::CODEC_OTHER )
+               ? NalParser::pictureNalType( codec, gate->lengthSize, buffer )
+               : -1;
+    bool h265 = ( codec == NalParser::CODEC_H265 );
+    // H.264: 5 = IDR. H.265: 16-21 = IRAP (BLA, IDR, CRA), 8-9 = RASL
+    bool irap = NalParser::isEntryPoint( codec, type );
+    bool rasl = NalParser::isRasl( codec, type );
 
     if ( mode == WAIT_SKIP_RASL )
     {
@@ -1033,7 +1035,8 @@ GstPadProbeReturn VideoPlayer::onDecoderInput( GstPad *_pad,
     //   which is a valid entry point; pictures that are not yet refreshed
     //   are flagged corrupt by libav and hidden (output-corrupt = false).
     // - Other codecs can only be judged by the DELTA_UNIT flag.
-    bool useNalType = h265 || ( codec == CODEC_H264 && mode == WAIT_IDR );
+    bool useNalType = h265 || ( codec == NalParser::CODEC_H264
+                                && mode == WAIT_IDR );
     bool clean = useNalType
                  ? irap
                  : !GST_BUFFER_FLAG_IS_SET( buffer,
@@ -1053,118 +1056,8 @@ void VideoPlayer::freeDecoderGate( gpointer _data )
 
 void VideoPlayer::configureGate( DecoderGate *_gate, GstCaps *_caps )
 {
-    _gate->codec = CODEC_OTHER;
-    _gate->lengthSize = 0;
-    if ( _caps == nullptr || gst_caps_is_empty( _caps ) )
-    {
-        return;
-    }
-    const GstStructure *structure = gst_caps_get_structure( _caps, 0 );
-    const char *name = gst_structure_get_name( structure );
-    bool h264 = ( g_strcmp0( name, "video/x-h264" ) == 0 );
-    bool h265 = ( g_strcmp0( name, "video/x-h265" ) == 0 );
-    if ( !h264 && !h265 )
-    {
-        return;     // other codecs: rely on the DELTA_UNIT flag
-    }
-
-    // byte-stream uses start codes; avc / hvc1 / hev1 prefix every NAL
-    // with its length, whose size is stored in codec_data.
-    int lengthSize = 0;
-    const char *format = gst_structure_get_string( structure,
-                                                   "stream-format" );
-    if ( format != nullptr && g_strcmp0( format, "byte-stream" ) != 0 )
-    {
-        lengthSize = 4;
-        const GValue *value = gst_structure_get_value( structure,
-                                                       "codec_data" );
-        GstBuffer *config = ( value != nullptr )
-                            ? gst_value_get_buffer( value ) : nullptr;
-        GstMapInfo map;
-        if ( config != nullptr
-             && gst_buffer_map( config, &map, GST_MAP_READ ) )
-        {
-            if ( h264 && map.size > 4 )
-            {
-                lengthSize = ( map.data[4] & 0x03 ) + 1;       // avcC
-            }
-            else if ( h265 && map.size > 21 )
-            {
-                lengthSize = ( map.data[21] & 0x03 ) + 1;      // hvcC
-            }
-            gst_buffer_unmap( config, &map );
-        }
-    }
-    _gate->lengthSize = lengthSize;
-    _gate->codec = h264 ? CODEC_H264 : CODEC_H265;
-}
-
-int VideoPlayer::pictureNalType( const DecoderGate *_gate,
-                                GstBuffer *_buffer )
-{
-    // Returns the NAL type of the first picture (VCL) NAL unit of an
-    // access unit, or -1 if there is none
-    GstMapInfo map;
-    if ( !gst_buffer_map( _buffer, &map, GST_MAP_READ ) )
-    {
-        return -1;
-    }
-    const guint8 *data = map.data;
-    gsize size = map.size;
-    int lengthSize = _gate->lengthSize;
-    bool h264 = ( _gate->codec == CODEC_H264 );
-    int result = -1;
-
-    // Visit the first byte of every NAL unit in the access unit
-    gsize pos = 0;
-    while ( result < 0 && pos < size )
-    {
-        gsize nal = 0;
-        gsize next = size;
-        if ( lengthSize > 0 )
-        {
-            if ( pos + lengthSize > size )
-            {
-                break;
-            }
-            gsize length = 0;
-            for ( int i = 0; i < lengthSize; ++i )
-            {
-                length = ( length << 8 ) | data[pos + i];
-            }
-            nal = pos + lengthSize;
-            next = nal + length;
-        }
-        else
-        {
-            // Find the next 00 00 01 start code
-            gsize i = pos;
-            while ( i + 2 < size
-                    && !( data[i] == 0 && data[i + 1] == 0
-                          && data[i + 2] == 1 ) )
-            {
-                ++i;
-            }
-            if ( i + 3 >= size )
-            {
-                break;
-            }
-            nal = i + 3;
-            next = nal;
-        }
-        if ( nal < size )
-        {
-            int type = h264 ? ( data[nal] & 0x1f )
-                            : ( ( data[nal] >> 1 ) & 0x3f );
-            // VCL types: H.264 1..5, H.265 0..31
-            bool vcl = h264 ? ( type >= 1 && type <= 5 ) : ( type <= 31 );
-            if ( vcl )
-            {
-                result = type;
-            }
-        }
-        pos = next;
-    }
-    gst_buffer_unmap( _buffer, &map );
-    return result;
+    // The parser recognises the codec and the way the NAL units are
+    // separated, so the gate and the keyframe index always agree.
+    _gate->codec = NalParser::codecFromCaps( _caps );
+    _gate->lengthSize = NalParser::lengthSizeFromCaps( _caps );
 }

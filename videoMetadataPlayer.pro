@@ -9,13 +9,17 @@ HEADERS += \
     frameView.hpp \
     barcodeReader.hpp \
     metadataTable.hpp \
-    metadataStore.hpp
+    metadataStore.hpp \
+    nalParser.hpp \
+    keyframeIndex.hpp
 
 SOURCES += \
     main.cpp \
     videoPlayer.cpp \
     frameView.cpp \
     barcodeReader.cpp \
-    metadataStore.cpp
+    metadataStore.cpp \
+    nalParser.cpp \
+    keyframeIndex.cpp
 
 RESOURCES += qml.qrc
