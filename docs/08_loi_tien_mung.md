@@ -395,6 +395,9 @@ Xem chi tiết ở `06_cat_video.md` mục 10. Tóm tắt:
 | E8 | ID lặp (file 2 giờ) → `filterIds` giữ cả hai lần | P2 |
 | E9 | Encoding CSV (BOM / UTF-8 vs Windows-1252) | P2 |
 | E10 | Đóng app khi đang cắt → file dang dở còn trên đĩa | P2 |
+| E17 | `emit-signals = FALSE` → callback `new-sample` không chạy → CSV rỗng | P0 |
+| E18 | Chữ ký callback `new-sample` sai (3 tham số) → đọc rác bộ nhớ | P0 |
+| E19 | `map.info.width` — `GstMapInfo` không có member `info` | P0 |
 
 ### E11. `GST_SEEK_FLAG_KEY_UNIT` vô dụng với MPEG-TS [P1]
 
@@ -453,6 +456,104 @@ Xem chi tiết ở `06_cat_video.md` mục 10. Tóm tắt:
 **Cách xử lý:** đọc PTS của buffer đầu tiên sau seek, hoặc tra mục lục.
 
 **Đây là việc còn dở** — hồ sơ cũ yêu cầu hiện đầu đoạn thực tế.
+
+### E17. `emit-signals = FALSE` khiến callback `new-sample` không chạy [P0]
+
+**Hiện tượng:** cắt video xong, file video có, nhưng file CSV **rỗng** (0 dòng),
+`framesVerified` = 0. Hoặc `CutController` báo "No metadata file was written".
+
+**Nguyên nhân:** `g_object_set( sink, "emit-signals", FALSE, nullptr )` trong khi
+`g_signal_connect( sink, "new-sample", ... )`. Theo tài liệu GStreamer, signal
+`new-sample` **chỉ** được phát khi `emit-signals` là TRUE (mặc định là FALSE vì
+lý do hiệu năng).
+
+→ Callback không bao giờ chạy → `state.ids` rỗng → `filterIds` trả rỗng →
+`MetadataStore::writeRows` không có dòng nào để ghi → xoá file CSV.
+
+**Cách xử lý:** đặt `emit-signals` là TRUE.
+
+**Trạng thái:** ✅ đã sửa (dòng 560 của `src/cutter/videoCutter.cpp`).
+
+**Cách kiểm chứng:** cắt một đoạn ngắn → CSV phải có **đúng** số dòng bằng số
+dòng trong `keptIds`, và `framesVerified` > 0.
+
+---
+
+### E18. Chữ ký callback `new-sample` sai → đọc rác bộ nhớ [P0]
+
+**Hiện tượng:** segfault trong `readIds`, hoặc đọc được ID rác.
+
+**Nguyên nhân:** callback được khai báo với **3** tham số:
+
+```cpp
+GstFlowReturn onVerifyFrame( GstAppSink *_sink, GstBuffer *_buffer,
+                             gpointer _data );
+```
+
+Nhưng signal `new-sample` có chữ ký chuẩn là:
+
+```c
+GstFlowReturn new_sample_callback( GstAppSink *appsink, gpointer user_data );
+```
+
+Signal **không** truyền buffer. Khi signal phát:
+- tham số thứ hai nhận **giá trị `gpointer user_data`** — tức là con trỏ `&state`,
+- tham số thứ ba đọc **ra ngoài vùng nhớ** (giá trị rác).
+
+`gst_buffer_map( _buffer, ... )` lúc đó map nhầm struct `IdState` (chứa `QMutex`
+và `QStringList`) thành một `GstBuffer` → segfault hoặc đọc rác.
+
+**Cách xử lý:** callback nhận đúng 2 tham số và tự pull sample:
+
+```cpp
+GstFlowReturn onVerifyFrame( GstAppSink *_sink, gpointer _data )
+{
+    IdState *state = static_cast<IdState *>( _data );
+    GstSample *sample = gst_app_sink_pull_sample( _sink );
+    ...
+    gst_sample_unref( sample );
+}
+```
+
+**Trạng thái:** ✅ đã sửa (dòng 75 của `src/cutter/videoCutter.cpp`).
+
+**Lưu ý quan trọng:** lỗi này và E17 che giấu lẫn nhau. Vì `emit-signals` là FALSE
+nên callback chưa bao giờ chạy, nên chữ ký sai chưa lộ ra. **Sửa E17 mà không sửa
+E18 sẽ crash ngay lập tức.**
+
+---
+
+### E19. `map.info.width` — `GstMapInfo` không có member `info` [P0 — build]
+
+**Hiện tượng:** lỗi compile `invalid use of incomplete type` hoặc
+`no member named 'info'`.
+
+**Nguyên nhân:** đọc hình bằng `gst_buffer_map()` rồi truy cập `map.info.width`.
+Cấu trúc `GstMapInfo` chỉ có:
+
+```c
+struct _GstMapInfo {
+  GstMemory *memory; GstMapFlags flags; guint8 *data;
+  gsize size; gsize maxsize; gpointer user_data[4]; ...
+};
+```
+
+Chiều rộng / chiều cao nằm trong `GstVideoInfo`, được lấy qua
+`gst_video_info_from_caps()` và đi qua `GstVideoFrame`.
+
+**Lỗi thứ hai trong cùng đoạn:** `map.size` là **số byte của bộ nhớ**, không phải
+chiều cao ảnh. Dựng `QImage( map.data, map.size, map.info.width, map.info.height, ... )`
+ngay cả khi biên dịch được cũng tạo ra **ảnh sai** (số dòng bị lấy từ số byte).
+
+**Cách xử lý:** dùng `gst_video_frame_map()` và đọc qua
+`GST_VIDEO_FRAME_PLANE_DATA()` / `GST_VIDEO_FRAME_PLANE_STRIDE()`.
+
+**Trạng thái:** ✅ đã sửa (`src/cutter/videoCutter.cpp`).
+
+**Cách kiểm chứng:** build sạch, rồi cắt thử và so `framesVerified` với số frame
+thật của file cắt.
+
+---
 
 ---
 
@@ -636,6 +737,7 @@ Xem F4.
 |---|---|---|---|
 | 1 | A1 | P0 | Ngay khi build |
 | 2 | A7, E4, E12 | P0 | Khi test cắt video |
+| 2b | **E17, E18, E19** | **P0** | **Đã sửa — build lại và test cắt video** |
 | 3 | A3 | P1 | Khi test seek chính xác |
 | 4 | D1 | P1 | Khi test mục lục |
 | 5 | A6, E1, E16 | P1 | Khi test cắt video |
@@ -661,6 +763,9 @@ Ghi lại để **không ai vô tình phá** khi sửa code:
 | E12 | `appsink` đặt `drop = FALSE` |
 | E13 | `readIds` liên kết động qua `pad-added` |
 | E14 | Kiểm tra `gst_filename_to_uri` trả nullptr |
+| E17 | `readIds` đặt `emit-signals = TRUE` |
+| E18 | `onVerifyFrame` nhận `( GstAppSink *, gpointer )` và tự pull sample |
+| E19 | `onVerifyFrame` đọc hình qua `gst_video_frame_map` |
 | F8 | `valueRange` bỏ qua NaN |
 | F9 | `paintLine` nâng bút khi gặp NaN |
 | F10 | `setValues` so sánh trước khi gán |

@@ -43,8 +43,25 @@ Nếu build lỗi, đó là lỗi thiếu include hoặc sai chữ ký — hãy 
 | 10.2 Vẽ bằng texture | ✅ Code xong, chưa test | `src/player/frameView.hpp/.cpp` |
 | 10.3 Thời lượng ổn định | ✅ Code xong, chưa test | `src/player/videoPlayer.cpp` |
 | 11.3 Overlay thông số | ✅ Code xong, chưa test | `qml/main.qml`, `src/player/videoPlayer.cpp` |
-| 11.4 Cắt video | ⚠️ Code xong, **chỉ hỗ trợ MPEG-TS** | `src/cutter/videoCutter.hpp/.cpp`, `src/cutter/cutController.hpp/.cpp` |
+| 11.4 Cất video | ⚠️ Code xong, **chỉ hỗ trợ MPEG-TS**, đã sửa 3 lỗi P0 (E17–E19) | `src/cutter/videoCutter.hpp/.cpp`, `src/cutter/cutController.hpp/.cpp` |
 | 11.5 Đồ thị pan/tilt | ✅ Code xong, chưa test | `src/views/panTiltGraph.hpp/.cpp` |
+
+### Đã sửa sau khi rà soát tỉnh (chưa build)
+
+Một vòng rà soát tỉnh trên máy Windows (không có Qt/GStreamer nên không build
+được) đã tìm ra **3 lỗi P0 trong `src/cutter/videoCutter.cpp`**, tất cả đã sửa:
+
+| Mã | Lỗi | Hḑu quả nếu không sửa |
+|---|---|---|
+| E17 | `emit-signals = FALSE` trong khi connect `new-sample` | Callback không chạy → CSV cắt ra **rỗng** |
+| E18 | Callback có 3 tham số thay và 2 | Signal truyền nhầm → đọc rác bộ nhớ, segfault |
+| E19 | `map.info.width` — `GstMapInfo` không có member `info` | **Không biên dịch được** |
+
+Chi tiết đầy đụ ố `docs/08_loi_tien_mung.md` mục E17–E19 và
+`docs/06_cat_video.md` mục 6.8 / 6.8.1.
+
+Có script kiểm tra tỉnh để chặn tái phát: `_check_gst_api.py` ở thư mục gốc
+workspace (`d:\Viettel\video`), chạy được bằng Python, không cần Qt.
 
 ### Việc chưa làm
 

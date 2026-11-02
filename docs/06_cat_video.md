@@ -334,18 +334,24 @@ Không đồng bộ theo đồng hồ → chạy **nhanh nhất có thể** (đ�
 
 ```cpp
 GstCaps *caps = gst_sample_get_caps( _sample );
+GstBuffer *buffer = gst_sample_get_buffer( _sample );
 GstVideoInfo info;
 gst_video_info_from_caps( &info, caps );
 GstVideoFrame frame;
-gst_video_frame_map( &frame, &info, _buffer );
-QImage image( GST_VIDEO_FRAME_PLANE_DATA( &frame, 0 ),
-              GST_VIDEO_FRAME_PLANE_WIDTH( &frame, 0 ),
-              GST_VIDEO_FRAME_PLANE_HEIGHT( &frame, 0 ),
+gst_video_frame_map( &frame, &info, buffer, GST_MAP_READ );
+const uchar *data = static_cast<const uchar *>(
+    GST_VIDEO_FRAME_PLANE_DATA( &frame, 0 ) );
+QImage image( data,
+              GST_VIDEO_FRAME_WIDTH( &frame, 0 ),
+              GST_VIDEO_FRAME_HEIGHT( &frame, 0 ),
               GST_VIDEO_FRAME_PLANE_STRIDE( &frame, 0 ),
-              QImage::Format_RGB888 );
+              QImage::Format_RGBA8888 );
 ```
 
-**Vì sao `Format_RGB888`:** barcode dựa trên **màu** (đen/trắng), cần đủ 3 kênh màu.
+**Vì sao `Format_RGBA8888`:** pipeline của cutter yêu cầu `video/x-raw,format=RGBA`, nên
+định dạng của ảnh **phải** khớp với định dạng đó. `BarcodeReader` chỉ nhận
+`Format_RGBA8888` và tự tính luma theo BT.601, nên dùng format khác sẽ không
+đọc được mã vạch.
 
 **Bắt buộc phải:**
 - `gst_video_frame_map` trước khi dùng, `gst_video_frame_unmap` trong **mọi** đường thoát.
@@ -353,6 +359,34 @@ QImage image( GST_VIDEO_FRAME_PLANE_DATA( &frame, 0 ),
 - `gst_caps_unref` sau khi dùng.
 
 **Lỗi dễ mắc:** nếu `gst_video_frame_map` thất bại thì `frame.data[0]` là con trỏ rác → segfault.
+
+**Lỗi đã mắc phải (đã sửa):** `GstMapInfo` **không có** member `info`. Cấu trúc đó chỉ có
+`memory`, `flags`, `data`, `size`, `maxsize`, `user_data`. Chiều rộng và chiều cao
+nằm trong `GstVideoInfo`. Dùng `gst_buffer_map` rồi đọc `map.info.width` sẽ **không
+biên dịch được**.
+
+Ngoài ra `map.size` là **số byte của bộ nhớ**, không phải chiều cao ảnh. Dựng `QImage`
+từ `map.data` + `map.size` sẽ tạo ra ảnh sai. Phải đi qua `GstVideoFrame`.
+
+### 6.8.1 Chữ ký callback của `new-sample` (đã sửa)
+
+Signal `new-sample` có chữ ký chuẩn là:
+
+```c
+GstFlowReturn new_sample_callback( GstAppSink *appsink, gpointer user_data );
+```
+
+**Chỉ 2 tham số.** Signal **không** truyền buffer. Muốn có sample thì phải
+`gst_app_sink_pull_sample( appsink )` ngay trong callback.
+
+**Lỗi đã mắc phải:** callback cũ khai báo 3 tham số
+`( GstAppSink *, GstBuffer *, gpointer )`. Khi signal phát, tham số thứ hai nhận
+**giá trị `gpointer user_data`** (chính là con trỏ `&state`), và tham số thứ ba
+đọc **ra ngoài vùng nhớ**. `gst_buffer_map()` lúc đó map nhầm struct `IdState`
+thành một `GstBuffer` → segfault hoặc đọc rác.
+
+Lỗi này bị che giấu vì `emit-signals` cũng bị đặt sai là `FALSE` nên callback
+**chưa bao giờ chạy**. Sửa `emit-signals` mà không sửa chữ ký sẽ crash ngay.
 
 ### 6.9 `readIds` chạy ở pool thread
 

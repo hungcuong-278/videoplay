@@ -9,6 +9,7 @@
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
+#include <gst/video/video.h>
 
 namespace
 {
@@ -71,36 +72,56 @@ void onDecoderPadAdded( GstElement *_element, GstPad *_pad, gpointer _data )
 /*!
  * \brief Reads the barcode of one picture of the new file.
  */
-GstFlowReturn onVerifyFrame( GstAppSink *_sink, GstBuffer *_buffer,
-                             gpointer _data )
+GstFlowReturn onVerifyFrame( GstAppSink *_sink, gpointer _data )
 {
-    Q_UNUSED( _sink );
     IdState *state = static_cast<IdState *>( _data );
     if ( state->cancel->load() )
     {
         return GST_FLOW_EOS;
     }
 
-    GstMapInfo map;
-    if ( !gst_buffer_map( _buffer, &map, GST_MAP_READ ) )
+    // The signal "new-sample" hands over no buffer: the sample has to be
+    // pulled out of the sink here.
+    GstSample *sample = gst_app_sink_pull_sample( _sink );
+    if ( sample == nullptr )
     {
         return GST_FLOW_OK;
     }
-    // The picture is in RGBA, because the pipeline asks for that format.
-    QImage frame( map.data, map.size, map.info.width, map.info.height,
-                  map.info.width * 4, QImage::Format_RGBA8888 );
-    qint64 frameId = -1;
-    if ( BarcodeReader::read( frame, frameId ) )
+
+    GstCaps *caps = gst_sample_get_caps( sample );
+    GstBuffer *buffer = gst_sample_get_buffer( sample );
+    GstVideoInfo info;
+    if ( caps != nullptr && buffer != nullptr
+         && gst_video_info_from_caps( &info, caps ) )
     {
-        QMutexLocker locker( &state->mutex );
-        state->ids.append( QString::number( frameId ) );
+        GstVideoFrame frame;
+        if ( gst_video_frame_map( &frame, &info, buffer, GST_MAP_READ ) )
+        {
+            // The picture is in RGBA, because the pipeline asks for that
+            // format. The stride of the frame is used, because a buffer
+            // can be longer than the picture it holds.
+            const uchar *data = static_cast<const uchar *>(
+                GST_VIDEO_FRAME_PLANE_DATA( &frame, 0 ) );
+            QImage picture( data,
+                            GST_VIDEO_FRAME_WIDTH( &frame ),
+                            GST_VIDEO_FRAME_HEIGHT( &frame ),
+                            GST_VIDEO_FRAME_PLANE_STRIDE( &frame, 0 ),
+                            QImage::Format_RGBA8888 );
+            qint64 frameId = -1;
+            if ( BarcodeReader::read( picture, frameId ) )
+            {
+                QMutexLocker locker( &state->mutex );
+                state->ids.append( QString::number( frameId ) );
+            }
+            gst_video_frame_unmap( &frame );
+        }
     }
-    gst_buffer_unmap( _buffer, &map );
 
     {
         QMutexLocker locker( &state->mutex );
         ++state->count;
     }
+    gst_sample_unref( sample );
     return GST_FLOW_OK;
 }
 }
@@ -534,7 +555,9 @@ QStringList VideoCutter::readIds( const QString &_path,
     // every container and every codec works without a change.
     g_object_set( demux, "uri", fileUri, nullptr );
     g_free( fileUri );
-    g_object_set( sink, "emit-signals", FALSE, nullptr );
+    // The signal "new-sample" is only sent when "emit-signals" is TRUE.
+    // Without it the callback never runs and no id is found at all.
+    g_object_set( sink, "emit-signals", TRUE, nullptr );
     g_object_set( sink, "sync", FALSE, nullptr );
     g_object_set( sink, "max-buffers", 1, nullptr );
     g_object_set( sink, "drop", FALSE, nullptr );
