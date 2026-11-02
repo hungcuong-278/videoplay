@@ -35,6 +35,15 @@
  * been scanned is published after every keyframe, so a seek into the
  * already scanned part is already fast.
  *
+ * Two timelines are stored for every keyframe:
+ * - The time on the stream timeline, in milliseconds. It is the time the
+ *   player shows, so it is the one a seek target is compared with.
+ * - The raw timestamp of the picture, in nanoseconds. The demuxer keeps
+ *   the timestamps of the file and only moves the origin of the segment
+ *   (an MPEG-TS file starts at 3600 s but is shown from 125 ms), so the
+ *   raw timestamp is the only value that the decoder gate and the scan
+ *   are guaranteed to agree on.
+ *
  * Threading model:
  * - The scan runs on a thread of the global QThreadPool. It owns its own
  *   GStreamer pipeline and shares nothing with the GUI thread.
@@ -52,6 +61,11 @@ class KeyframeIndex : public QObject
     Q_PROPERTY( int keyframeCount READ keyframeCount
                 NOTIFY keyframeChanged )
     Q_PROPERTY( bool complete READ isComplete NOTIFY keyframeChanged )
+    Q_PROPERTY( qint64 durationMs READ durationMs NOTIFY keyframeChanged )
+    Q_PROPERTY( qint64 largestGapMs READ largestGapMs
+                NOTIFY keyframeChanged )
+    Q_PROPERTY( qint64 lastKnownTimeMs READ lastKnownTimeMs
+                NOTIFY keyframeChanged )
     Q_PROPERTY( QString path READ path NOTIFY scanningChanged )
     Q_PROPERTY( QString errorString READ errorString NOTIFY scanningChanged )
 
@@ -102,6 +116,33 @@ public:
     bool isComplete() const;
 
     /*!
+     * \brief Returns the exact duration of the file in milliseconds.
+     *
+     * A container without an index only reports an estimated duration,
+     * which is often too short. The scan knows the time of the last
+     * picture of the file, so it knows the real duration.
+     * \return Duration in milliseconds, or 0 when it is not known yet.
+     */
+    qint64 durationMs() const;
+
+    /*!
+     * \brief Returns the largest gap between two keyframes, in milliseconds.
+     *
+     * The gap tells how many pictures a seek has to decode at the most.
+     * \return Gap in milliseconds, or 0 when it is not known yet.
+     */
+    qint64 largestGapMs() const;
+
+    /*!
+     * \brief Returns the time of the last keyframe found, in milliseconds.
+     *
+     * The value tells how far the scan has reached. A seek target
+     * before that time can be served from the table, a later one cannot.
+     * \return Time in milliseconds, or -1 when nothing was found yet.
+     */
+    qint64 lastKnownTimeMs() const;
+
+    /*!
      * \brief Returns the path of the file being scanned.
      */
     QString path() const;
@@ -120,6 +161,18 @@ public:
     qint64 entryTimeBefore( qint64 _timeMs ) const;
 
     /*!
+     * \brief Looks up the entry point of a seek.
+     *
+     * The entry point is the last keyframe at or before the target. The
+     * pictures before it would be decoded and thrown away again, so a
+     * decoder gate can skip them.
+     * \param _timeMs Target of the seek, on the stream timeline.
+     * \param ptsNs_ Receives the raw timestamp of the keyframe.
+     * \return True when a usable entry point is known.
+     */
+    bool entryPtsBefore( qint64 _timeMs, qint64 &ptsNs_ ) const;
+
+    /*!
      * \brief Returns the times of all keyframes found, in milliseconds.
      */
     QVector<qint64> keyframeTimes() const;
@@ -131,26 +184,39 @@ signals:
 
 private:
     /*!
-     * \brief Immutable snapshot of the keyframes found so far.
+     * \brief Immutable snapshot of what the scan has found.
      */
     struct Snapshot
     {
         QVector<qint64> times;     // keyframe times, in milliseconds
+        QVector<qint64> pts;       // raw timestamps, in nanoseconds
         bool complete = false;
         QString errorString;
+        qint64 durationMs = 0;     // exact duration, 0 when unknown
+        qint64 largestGapMs = 0;    // largest gap between two keyframes
     };
 
     typedef QSharedPointer<const Snapshot> SnapshotPointer;
 
     /*!
-     * \brief Called by the scan when it has found something new.
-     *
-     * The arguments hold the keyframes found so far, how much of the
-     * file has been read in percent, and whether the whole file has been
-     * scanned.
+     * \brief What the scan reports to the GUI thread.
      */
-    typedef std::function< void( const QVector<qint64> &, int, bool ) >
-            ProgressCallback;
+    struct ScanResult
+    {
+        QVector<qint64> times;
+        QVector<qint64> pts;
+        int percent = 0;
+        bool complete = false;
+        qint64 durationMs = 0;
+        qint64 largestGapMs = 0;
+    };
+
+    /*!
+     * \brief Called by the scan when it has new results.
+     *
+     * The callback runs on the pool thread.
+     */
+    typedef std::function< void( const ScanResult & ) > ProgressCallback;
 
     /*!
      * \brief Walks through a file and collects the time of every keyframe.
@@ -176,25 +242,40 @@ private:
      * \brief Writes the keyframe times next to the video file.
      * \param _filePath Path of the video file.
      * \param _times Keyframe times, in milliseconds.
+     * \param _pts Raw timestamps of the keyframes, in nanoseconds.
+     * \param _durationMs Exact duration of the file, in milliseconds.
      * \return True when the cache file was written.
      */
     static bool writeCache( const QString &_filePath,
-                            const QVector<qint64> &_times );
+                            const QVector<qint64> &_times,
+                            const QVector<qint64> &_pts,
+                            qint64 _durationMs );
 
     /*!
      * \brief Reads the keyframe times of a cache file.
      * \param _filePath Path of the video file.
      * \param times_ Receives the keyframe times, in milliseconds.
+     * \param pts_ Receives the raw timestamps, in nanoseconds.
+     * \param durationMs_ Receives the exact duration, in milliseconds.
      * \return True when a matching cache file was found and read.
      */
     static bool readCache( const QString &_filePath,
-                           QVector<qint64> &times_ );
+                           QVector<qint64> &times_,
+                           QVector<qint64> &pts_,
+                           qint64 &durationMs_ );
 
     /*!
      * \brief Returns the path of the cache file of a video file.
      * \param _filePath Path of the video file.
      */
     static QString cachePath( const QString &_filePath );
+
+    /*!
+     * \brief Returns the largest gap between two neighbouring keyframes.
+     * \param _times Keyframe times, in milliseconds, sorted.
+     * \return Gap in milliseconds, 0 when there is less than two.
+     */
+    static qint64 largestGap( const QVector<qint64> &_times );
 
     void onScanFinished();
     void setError( const QString &_text );

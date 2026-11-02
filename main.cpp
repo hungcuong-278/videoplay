@@ -9,6 +9,7 @@
 #include "videoPlayer.hpp"
 #include "frameView.hpp"
 #include "metadataStore.hpp"
+#include "keyframeIndex.hpp"
 
 /*!
  * \brief Converts a command-line path to a local file URL.
@@ -33,6 +34,7 @@ int main( int argc, char *argv[] )
     // references to them until the engine is gone.
     VideoPlayer player;
     MetadataStore metadata;
+    KeyframeIndex keyframes;
 
     // Both objects live in the GUI thread, so these are direct calls.
     QObject::connect( &player, &VideoPlayer::frameReady, &metadata,
@@ -43,9 +45,28 @@ int main( int argc, char *argv[] )
     QObject::connect( &player, &VideoPlayer::sourceChanged,
                       &metadata, &MetadataStore::resetStats );
 
+    // The player uses the index to skip the pictures that an accurate
+    // seek would throw away anyway.
+    player.setKeyframeIndex( &keyframes );
+
+    // Every new file gets a new index. The scan runs in the background,
+    // so the video can be opened and played right away.
+    QObject::connect( &player, &VideoPlayer::sourceChanged, &keyframes,
+                      [&player, &keyframes]()
+    {
+        QString path = player.source();
+        if ( !path.startsWith( "file://" ) )
+        {
+            keyframes.stop();
+            return;
+        }
+        keyframes.start( QUrl( path ).toLocalFile() );
+    } );
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty( "videoPlayer", &player );
     engine.rootContext()->setContextProperty( "metadata", &metadata );
+    engine.rootContext()->setContextProperty( "keyframes", &keyframes );
     engine.load( QUrl( QStringLiteral( "qrc:/qml/main.qml" ) ) );
     if ( engine.rootObjects().isEmpty() )
     {

@@ -36,7 +36,12 @@ VideoPlayer::VideoPlayer( QObject *_parent )
       m_previewSeek( false ),
       m_previewInFlight( false ),
       m_accurateTarget( -1 ),
-      m_accurateRetries( 0 )
+      m_accurateRetries( 0 ),
+      m_entryPts( GST_CLOCK_TIME_NONE ),
+      m_entryToleranceNs( 0 ),
+      m_keyframeIndex( nullptr ),
+      m_useKeyframeIndex( true ),
+      m_decoderBuffers( 0 )
 {
     // GStreamer has no "position changed" message, so the position is
     // polled. A 100 ms GUI timer is cheap and keeps the slider smooth.
@@ -150,6 +155,31 @@ bool VideoPlayer::open( const QUrl &_url )
     }
     m_positionTimer.start();
     return true;
+}
+
+void VideoPlayer::setKeyframeIndex( KeyframeIndex *_index )
+{
+    m_keyframeIndex = _index;
+}
+
+KeyframeIndex *VideoPlayer::keyframeIndex() const
+{
+    return m_keyframeIndex;
+}
+
+void VideoPlayer::setUseKeyframeIndex( bool _enabled )
+{
+    if ( _enabled == m_useKeyframeIndex )
+    {
+        return;
+    }
+    m_useKeyframeIndex = _enabled;
+    emit useKeyframeIndexChanged();
+}
+
+bool VideoPlayer::useKeyframeIndex() const
+{
+    return m_useKeyframeIndex;
 }
 
 void VideoPlayer::play()
@@ -336,6 +366,11 @@ quint64 VideoPlayer::unreadableFrames() const
     return m_unreadableFrames;
 }
 
+quint64 VideoPlayer::decoderBuffers() const
+{
+    return m_decoderBuffers.load();
+}
+
 void VideoPlayer::closePipeline()
 {
     m_positionTimer.stop();
@@ -380,6 +415,10 @@ void VideoPlayer::closePipeline()
     m_latestFrameEnd = -1;
     m_deliveredFrames = 0;
     m_unreadableFrames = 0;
+    m_decoderBuffers = 0;
+    // The entry point belongs to the file that has just been closed.
+    m_entryPts = GST_CLOCK_TIME_NONE;
+    m_entryToleranceNs = 0;
     if ( m_playing )
     {
         m_playing = false;
@@ -546,8 +585,27 @@ void VideoPlayer::updateDuration()
         durationMs = qMax( durationMs,
                            static_cast<qint64>( duration / GST_MSECOND ) );
     }
+
+    // The keyframe index knows the exact duration: the end of the last
+    // picture of the file. It is the best value available, so it wins.
+    if ( m_keyframeIndex != nullptr )
+    {
+        qint64 exact = m_keyframeIndex->durationMs();
+        if ( exact > 0 )
+        {
+            durationMs = exact;
+        }
+    }
+
+    // The estimate of the demuxer changes while the file is read, and it
+    // often becomes shorter. A duration that shrinks makes the handle of
+    // the slider drift, so it only grows.
     if ( durationMs > 0 && durationMs != m_duration )
     {
+        if ( durationMs < m_duration && m_duration > 0 )
+        {
+            return;
+        }
         m_duration = durationMs;
         emit durationChanged();
     }
@@ -565,6 +623,11 @@ void VideoPlayer::startSeek( qint64 _positionMs, bool _accurate )
                           | GST_SEEK_FLAG_SNAP_NEAREST ) ) );
     // Tell the decoder gates which kind of seek the coming flush belongs to
     m_previewSeek = !_accurate;
+    // The keyframe index tells which picture the decoder has to start
+    // with. The demuxer of a container without an index usually starts
+    // several groups of pictures too early, and the decoder then decodes
+    // hundreds of pictures that are thrown away again.
+    updateEntryPoint( _positionMs, _accurate );
     bool ok = gst_element_seek( m_pipeline, m_rate, GST_FORMAT_TIME, flags,
                                 GST_SEEK_TYPE_SET,
                                 _positionMs * GST_MSECOND,
@@ -579,6 +642,37 @@ void VideoPlayer::startSeek( qint64 _positionMs, bool _accurate )
     m_previewInFlight = !_accurate;
     m_accurateTarget = _accurate ? _positionMs : -1;
     m_seekClock.start();
+}
+
+void VideoPlayer::updateEntryPoint( qint64 _positionMs, bool _accurate )
+{
+    // Without an index, or for a preview seek, the gate works as before.
+    m_entryPts = GST_CLOCK_TIME_NONE;
+    m_entryToleranceNs = 0;
+    if ( !_accurate || !m_useKeyframeIndex || m_keyframeIndex == nullptr )
+    {
+        return;
+    }
+
+    // The index only knows the part of the file that has been scanned.
+    // A target beyond that point cannot be served from the table.
+    qint64 lastKnown = m_keyframeIndex->lastKnownTimeMs();
+    if ( lastKnown < 0 || _positionMs > lastKnown )
+    {
+        return;
+    }
+
+    qint64 ptsNs = -1;
+    if ( !m_keyframeIndex->entryPtsBefore( _positionMs, ptsNs ) )
+    {
+        return;
+    }
+
+    // The gate compares the raw timestamp of a picture with this value.
+    // A small tolerance covers the difference between the moment the
+    // index was built and the moment the picture is decoded.
+    m_entryToleranceNs = static_cast<gint64>( 2 * GST_MSECOND );
+    m_entryPts = static_cast<guint64>( ptsNs );
 }
 
 void VideoPlayer::updateNominalFrameDuration()
@@ -932,6 +1026,8 @@ void VideoPlayer::onDeepElementAdded( GstBin *_bin, GstBin *_subBin,
     gate->lengthSize = 0;
     gate->waitMode = WAIT_NONE;
     gate->dropped = 0;
+    gate->entryPts = GST_CLOCK_TIME_NONE;
+    gate->entryToleranceNs = 0;
     GstCaps *caps = gst_pad_get_current_caps( pad );
     if ( caps != nullptr )
     {
@@ -944,7 +1040,23 @@ void VideoPlayer::onDeepElementAdded( GstBin *_bin, GstBin *_subBin,
                                 | GST_PAD_PROBE_TYPE_EVENT_FLUSH ),
                        &VideoPlayer::onDecoderInput, gate,
                        &VideoPlayer::freeDecoderGate );
+    // The counter is added after the gate, so it only sees the buffers
+    // that really reach the decoder. The difference between the number
+    // of buffers before and after the gate is the work the gate saved.
+    gst_pad_add_probe( pad, GST_PAD_PROBE_TYPE_BUFFER,
+                       &VideoPlayer::onDecoderBuffer, _data, nullptr );
     gst_object_unref( pad );
+}
+
+GstPadProbeReturn VideoPlayer::onDecoderBuffer( GstPad *_pad,
+                                                 GstPadProbeInfo *_info,
+                                                 gpointer _data )
+{
+    Q_UNUSED( _pad );
+    Q_UNUSED( _info );
+    VideoPlayer *player = static_cast<VideoPlayer *>( _data );
+    ++player->m_decoderBuffers;
+    return GST_PAD_PROBE_OK;
 }
 
 GstPadProbeReturn VideoPlayer::onDecoderInput( GstPad *_pad,
@@ -978,6 +1090,24 @@ GstPadProbeReturn VideoPlayer::onDecoderInput( GstPad *_pad,
             bool preview = gate->player->m_previewSeek;
             gate->dropped = 0;
             gate->waitMode = preview ? WAIT_IDR : WAIT_NON_DELTA;
+
+            // The keyframe index knows the exact picture the decoder has
+            // to start with. When it does, the gate drops every picture
+            // before that one, so the decoder does not waste time on
+            // pictures that the seek throws away anyway.
+            guint64 entryPts = gate->player->m_entryPts;
+            if ( !preview && GST_CLOCK_TIME_IS_VALID( entryPts ) )
+            {
+                gate->waitMode = WAIT_UNTIL_ENTRY;
+                gate->entryPts = entryPts;
+                gate->entryToleranceNs = gate->player->m_entryToleranceNs;
+            }
+            else
+            {
+                gate->entryPts = GST_CLOCK_TIME_NONE;
+                gate->entryToleranceNs = 0;
+            }
+
             // A preview decodes a single IDR and must never show a picture
             // with missing references: grey, or an old frame whose bar
             // reads as a valid but wrong id. An accurate seek must land on
@@ -1014,6 +1144,34 @@ GstPadProbeReturn VideoPlayer::onDecoderInput( GstPad *_pad,
     // H.264: 5 = IDR. H.265: 16-21 = IRAP (BLA, IDR, CRA), 8-9 = RASL
     bool irap = NalParser::isEntryPoint( codec, type );
     bool rasl = NalParser::isRasl( codec, type );
+
+    if ( mode == WAIT_UNTIL_ENTRY )
+    {
+        // The index says where the decoder has to start. Every picture
+        // before that one is dropped here, so it never reaches the
+        // decoder and never costs any decoding time.
+        //
+        // The comparison uses the raw timestamp of the picture, because
+        // that is the one value the scan and the decoder are guaranteed
+        // to agree on: the demuxer keeps the timestamps of the file and
+        // only moves the origin of the segment.
+        guint64 entryPts = gate->entryPts;
+        gint64 tolerance = gate->entryToleranceNs;
+        if ( GST_CLOCK_TIME_IS_VALID( entryPts )
+             && GST_BUFFER_PTS_IS_VALID( buffer ) )
+        {
+            gint64 pts = static_cast<gint64>( GST_BUFFER_PTS( buffer ) );
+            gint64 target = static_cast<gint64>( entryPts );
+            if ( pts + tolerance < target )
+            {
+                return GST_PAD_PROBE_DROP;
+            }
+        }
+        // The entry point has been reached: from here on every picture
+        // belongs to the group of pictures the seek asked for.
+        gate->waitMode = WAIT_NONE;
+        return GST_PAD_PROBE_OK;
+    }
 
     if ( mode == WAIT_SKIP_RASL )
     {

@@ -137,6 +137,40 @@ ApplicationWindow {
                     }
                 }
 
+                // State of the keyframe index. The index is built in the
+                // background and makes the accurate seeks of a file
+                // without a keyframe table much faster.
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    visible: keyframes.scanning || keyframes.complete
+
+                    ProgressBar {
+                        id: indexBar
+                        Layout.preferredWidth: 140
+                        from: 0
+                        to: 100
+                        value: keyframes.progress
+                        visible: keyframes.scanning
+                    }
+
+                    Label {
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        color: "gray"
+                        text: {
+                            if (keyframes.scanning)
+                                return "Indexing " + keyframes.progress + "%"
+                                       + "   keyframes "
+                                       + keyframes.keyframeCount
+                            if (keyframes.errorString !== "")
+                                return "Index error: " + keyframes.errorString
+                            return "Index ready   keyframes "
+                                   + keyframes.keyframeCount
+                        }
+                    }
+                }
+
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
@@ -212,6 +246,17 @@ ApplicationWindow {
                     }
 
                     Item { Layout.fillWidth: true }
+
+                    // Switch the keyframe index on or off, to compare the
+                    // behaviour of the player with and without it.
+                    CheckBox {
+                        id: indexBox
+                        focusPolicy: Qt.NoFocus
+                        checked: videoPlayer.useKeyframeIndex
+                        enabled: keyframes.keyframeCount > 0
+                        text: "Use index"
+                        onToggled: videoPlayer.useKeyframeIndex = checked
+                    }
 
                     Label {
                         font.family: "monospace"

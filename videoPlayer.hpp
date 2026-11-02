@@ -23,6 +23,7 @@
 
 #include "barcodeReader.hpp"
 #include "nalParser.hpp"
+#include "keyframeIndex.hpp"
 
 /*!
  * \brief Plays any video supported by the installed GStreamer plugins and
@@ -52,8 +53,12 @@ class VideoPlayer : public QObject
     Q_PROPERTY( qint64 frameTime READ frameTime NOTIFY frameReady )
     Q_PROPERTY( double rate READ rate NOTIFY rateChanged )
     Q_PROPERTY( bool seekable READ isSeekable NOTIFY seekableChanged )
+    Q_PROPERTY( bool useKeyframeIndex READ useKeyframeIndex
+                WRITE setUseKeyframeIndex NOTIFY useKeyframeIndexChanged )
     Q_PROPERTY( quint64 unreadableFrames READ unreadableFrames
                 NOTIFY frameReady )
+    Q_PROPERTY( quint64 decoderBuffers READ decoderBuffers
+                NOTIFY decoderBuffersChanged )
 
 public:
     /*!
@@ -72,7 +77,36 @@ public:
      * \param _url Local file URL or any URI GStreamer understands.
      * \return True if the pipeline was created.
      */
-    Q_INVOKABLE bool open( const QUrl &_url );
+    Q_INVOKABLE void open( const QUrl &_url );
+
+    /*!
+     * \brief Gives the player a keyframe index to seek faster.
+     *
+     * The index is not owned by the player. With an index, an accurate
+     * seek drops every picture before the last keyframe of the target,
+     * so the decoder does not decode pictures that would be thrown away.
+     * \param _index Keyframe index, may be nullptr.
+     */
+    void setKeyframeIndex( KeyframeIndex *_index );
+
+    /*!
+     * \brief Returns the keyframe index of the player.
+     */
+    KeyframeIndex *keyframeIndex() const;
+
+    /*!
+     * \brief Turns the use of the keyframe index on or off.
+     *
+     * The index makes the accurate seeks of a file without a keyframe
+     * table faster. It can be switched off to compare the behaviour.
+     * \param _enabled True to use the index.
+     */
+    void setUseKeyframeIndex( bool _enabled );
+
+    /*!
+     * \brief Returns true when the keyframe index is used.
+     */
+    bool useKeyframeIndex() const;
 
     /*!
      * \brief Starts or resumes playback.
@@ -185,6 +219,15 @@ public:
      */
     quint64 unreadableFrames() const;
 
+    /*!
+     * \brief Returns how many buffers reached the video decoder.
+     *
+     * The number shows the cost of a seek: a container without a
+     * keyframe table makes the decoder decode hundreds of pictures that
+     * are thrown away again.
+     */
+    quint64 decoderBuffers() const;
+
 signals:
     void playingChanged();
     void positionChanged();
@@ -194,6 +237,8 @@ signals:
     void frameReady();
     void rateChanged();
     void seekableChanged();
+    void useKeyframeIndexChanged();
+    void decoderBuffersChanged();
 
 private:
     /*!
@@ -216,6 +261,7 @@ private:
     void setError( const QString &_text );
     void storeFrame( GstSample *_sample );
     void startSeek( qint64 _positionMs, bool _accurate );
+    void updateEntryPoint( qint64 _positionMs, bool _accurate );
     void updateNominalFrameDuration();
     void onSeekDone();
     void updateSeekable();
@@ -245,6 +291,10 @@ private:
         std::atomic<int> lengthSize;    // NAL length prefix, 0 = start codes
         std::atomic<int> waitMode;      // WaitMode
         std::atomic<int> dropped;
+        // The picture an accurate seek has to start at, and how far the
+        // index and the decoder may disagree about its time.
+        std::atomic<guint64> entryPts;
+        std::atomic<gint64> entryToleranceNs;
     };
 
     enum WaitMode
@@ -252,7 +302,8 @@ private:
         WAIT_NONE = 0,
         WAIT_NON_DELTA = 1,     // accurate seek: wait for an entry point
         WAIT_IDR = 2,           // preview seek: wait for an IDR / IRAP
-        WAIT_SKIP_RASL = 3      // H.265 after an IRAP: skip RASL pictures
+        WAIT_SKIP_RASL = 3,     // H.265 after an IRAP: skip RASL pictures
+        WAIT_UNTIL_ENTRY = 4    // accurate seek: wait for a known keyframe
     };
 
     static void onDeepElementAdded( GstBin *_bin, GstBin *_subBin,
@@ -261,6 +312,9 @@ private:
                                              GstPadProbeInfo *_info,
                                              gpointer _data );
     static void freeDecoderGate( gpointer _data );
+    static GstPadProbeReturn onDecoderBuffer( GstPad *_pad,
+                                              GstPadProbeInfo *_info,
+                                              gpointer _data );
     static void configureGate( DecoderGate *_gate, GstCaps *_caps );
 
     // Give up waiting after this many dropped buffers: a stream that
@@ -327,6 +381,27 @@ private:
     bool m_previewInFlight;     // GUI thread only
     qint64 m_accurateTarget;    // target of the running accurate seek
     int m_accurateRetries;
+
+    // The time of the keyframe an accurate seek has to start at. The
+    // gate drops every picture before it, so the decoder does not waste
+    // time on pictures that the seek would throw away anyway.
+    // GST_CLOCK_TIME_NONE means there is no known entry point.
+    std::atomic<guint64> m_entryPts;
+    // How far the index and the player may disagree on the time of a
+    // keyframe, in nanoseconds. A small value keeps the gate from
+    // waiting for a keyframe that has already passed.
+    std::atomic<gint64> m_entryToleranceNs;
+
+    // The keyframe index of the opened file, not owned. It is only read
+    // from the GUI thread, so no lock is needed.
+    KeyframeIndex *m_keyframeIndex;
+    // Whether the index is used for the seeks. It can be switched off to
+    // compare the behaviour of the player with and without it.
+    bool m_useKeyframeIndex;
+    // Number of buffers that reached the video decoder. It shows the
+    // cost of a seek. It is written by the streaming threads, so it is
+    // atomic.
+    std::atomic<quint64> m_decoderBuffers;
 };
 
 #endif // VIDEOPLAYER_HPP

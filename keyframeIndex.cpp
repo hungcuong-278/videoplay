@@ -36,7 +36,8 @@ struct ScanState
 {
     QSharedPointer<QAtomicInt> cancel;
     QMutex mutex;
-    QVector<qint64> times;
+    QVector<qint64> times;     // stream time of every keyframe, in ms
+    QVector<qint64> pts;       // raw timestamp of every keyframe, in ns
     GstSegment segment;
     bool haveSegment = false;
     int codec = 0;
@@ -44,6 +45,11 @@ struct ScanState
     int percent = 0;
     qint64 fileSize = 0;
     qint64 bytesRead = 0;
+    // The time of the last picture of the file. Together with the time
+    // of one picture it gives the exact duration.
+    qint64 lastPictureMs = -1;
+    qint64 lastPictureEndMs = -1;
+    qint64 firstPictureMs = -1;
     bool haveVideoPad = false;
     bool failed = false;
     QString errorString;
@@ -83,6 +89,42 @@ GstPadProbeReturn onScanBuffer( GstPad *_pad, GstPadProbeInfo *_info,
     state->lengthSize = NalParser::lengthSizeFromCaps( caps );
     state->haveVideoPad = true;
 
+    // The time of this picture on the stream timeline, the same one the
+    // player shows.
+    qint64 timeMs = -1;
+    qint64 endMs = -1;
+    if ( GST_BUFFER_PTS_IS_VALID( buffer ) )
+    {
+        if ( state->haveSegment )
+        {
+            guint64 streamTime = gst_segment_to_stream_time(
+                &state->segment, GST_FORMAT_TIME,
+                GST_BUFFER_PTS( buffer ) );
+            if ( GST_CLOCK_TIME_IS_VALID( streamTime ) )
+            {
+                timeMs = static_cast<qint64>( streamTime / GST_MSECOND );
+            }
+        }
+        if ( GST_BUFFER_DURATION_IS_VALID( buffer ) )
+        {
+            endMs = timeMs + static_cast<qint64>(
+                GST_BUFFER_DURATION( buffer ) / GST_MSECOND );
+        }
+    }
+
+    if ( timeMs >= 0 )
+    {
+        if ( state->firstPictureMs < 0 )
+        {
+            state->firstPictureMs = timeMs;
+        }
+        if ( timeMs > state->lastPictureMs )
+        {
+            state->lastPictureMs = timeMs;
+            state->lastPictureEndMs = endMs;
+        }
+    }
+
     // A parser marks the frames that are not keyframes with the delta
     // unit flag, so only the others have to be looked at more closely.
     // That keeps the scan cheap on long files.
@@ -98,24 +140,15 @@ GstPadProbeReturn onScanBuffer( GstPad *_pad, GstPadProbeInfo *_info,
         candidate = NalParser::isEntryPoint( codec, type );
     }
 
-    if ( candidate && GST_BUFFER_PTS_IS_VALID( buffer ) )
+    if ( candidate && timeMs >= 0
+         && ( state->times.isEmpty() || state->times.last() != timeMs ) )
     {
-        qint64 timeMs = -1;
-        if ( state->haveSegment )
-        {
-            guint64 streamTime = gst_segment_to_stream_time(
-                &state->segment, GST_FORMAT_TIME,
-                GST_BUFFER_PTS( buffer ) );
-            if ( GST_CLOCK_TIME_IS_VALID( streamTime ) )
-            {
-                timeMs = static_cast<qint64>( streamTime / GST_MSECOND );
-            }
-        }
-        if ( timeMs >= 0
-             && ( state->times.isEmpty() || state->times.last() != timeMs ) )
-        {
-            state->times.append( timeMs );
-        }
+        state->times.append( timeMs );
+        // The raw timestamp is stored as well: it is the only value the
+        // decoder gate and the scan are guaranteed to agree on.
+        state->pts.append( static_cast<qint64>(
+            GST_BUFFER_PTS_IS_VALID( buffer ) ? GST_BUFFER_PTS( buffer )
+                                              : 0 ) );
     }
 
     // The offset of the buffer tells how much of the file has been read,
@@ -207,11 +240,16 @@ void KeyframeIndex::start( const QString &_filePath )
 
     // A cache file of an earlier run makes the start immediate.
     QVector<qint64> cached;
-    if ( readCache( _filePath, cached ) )
+    QVector<qint64> cachedPts;
+    qint64 cachedDuration = 0;
+    if ( readCache( _filePath, cached, cachedPts, cachedDuration ) )
     {
         SnapshotPointer snapshot( new Snapshot );
         snapshot->times = cached;
+        snapshot->pts = cachedPts;
         snapshot->complete = true;
+        snapshot->durationMs = cachedDuration;
+        snapshot->largestGapMs = largestGap( cached );
         publish( snapshot );
         m_progress = 100;
         emit progressChanged();
@@ -224,24 +262,25 @@ void KeyframeIndex::start( const QString &_filePath )
 
     // The callback runs on the pool thread. It builds a new immutable
     // snapshot and hands it to the GUI thread, which publishes it.
-    ProgressCallback callback = [this, generation](
-                                    const QVector<qint64> &_times,
-                                    int _percent, bool _complete )
+    ProgressCallback callback = [this, generation]( const ScanResult &_result )
     {
         SnapshotPointer snapshot( new Snapshot );
-        snapshot->times = _times;
-        snapshot->complete = _complete;
+        snapshot->times = _result.times;
+        snapshot->pts = _result.pts;
+        snapshot->complete = _result.complete;
+        snapshot->durationMs = _result.durationMs;
+        snapshot->largestGapMs = _result.largestGapMs;
         QMetaObject::invokeMethod(
-            this, [this, generation, snapshot, _percent]()
+            this, [this, generation, snapshot, _result]()
             {
                 if ( generation != m_generation )
                 {
                     return;     // the file changed, the result is stale
                 }
                 publish( snapshot );
-                if ( _percent != m_progress )
+                if ( _result.percent != m_progress )
                 {
-                    m_progress = _percent;
+                    m_progress = _result.percent;
                     emit progressChanged();
                 }
             }, Qt::QueuedConnection );
@@ -298,6 +337,18 @@ bool KeyframeIndex::isComplete() const
     return !m_snapshot.isNull() && m_snapshot->complete;
 }
 
+qint64 KeyframeIndex::durationMs() const
+{
+    QMutexLocker locker( &m_mutex );
+    return m_snapshot.isNull() ? 0 : m_snapshot->durationMs;
+}
+
+qint64 KeyframeIndex::largestGapMs() const
+{
+    QMutexLocker locker( &m_mutex );
+    return m_snapshot.isNull() ? 0 : m_snapshot->largestGapMs;
+}
+
 QString KeyframeIndex::path() const
 {
     return m_path;
@@ -337,10 +388,61 @@ qint64 KeyframeIndex::entryTimeBefore( qint64 _timeMs ) const
     return found < 0 ? -1 : times.at( found );
 }
 
+qint64 KeyframeIndex::lastKnownTimeMs() const
+{
+    QMutexLocker locker( &m_mutex );
+    if ( m_snapshot.isNull() || m_snapshot->times.isEmpty() )
+    {
+        return -1;
+    }
+    return m_snapshot->times.last();
+}
+
 QVector<qint64> KeyframeIndex::keyframeTimes() const
 {
     QMutexLocker locker( &m_mutex );
     return m_snapshot.isNull() ? QVector<qint64>() : m_snapshot->times;
+}
+
+bool KeyframeIndex::entryPtsBefore( qint64 _timeMs, qint64 &ptsNs_ ) const
+{
+    QMutexLocker locker( &m_mutex );
+    ptsNs_ = -1;
+    if ( m_snapshot.isNull() || m_snapshot->times.isEmpty() )
+    {
+        return false;
+    }
+    // The times are sorted, so the last one below the target is found
+    // with a binary search.
+    const QVector<qint64> &times = m_snapshot->times;
+    int low = 0;
+    int high = times.size() - 1;
+    int found = -1;
+    while ( low <= high )
+    {
+        int middle = ( low + high ) / 2;
+        if ( times.at( middle ) <= _timeMs )
+        {
+            found = middle;
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle - 1;
+        }
+    }
+    if ( found < 0 )
+    {
+        return false;
+    }
+    // The raw timestamp is only known when the scan stored it. Without it
+    // the gate cannot compare anything, so the seek works as before.
+    if ( m_snapshot->pts.size() <= found )
+    {
+        return false;
+    }
+    ptsNs_ = m_snapshot->pts.at( found );
+    return ptsNs_ > 0;
 }
 
 void KeyframeIndex::publish( const SnapshotPointer &_snapshot )
@@ -374,7 +476,8 @@ void KeyframeIndex::onScanFinished()
         {
             m_progress = 100;
             emit progressChanged();
-            writeCache( m_path, result->times );
+            writeCache( m_path, result->times, result->pts,
+                        result->durationMs );
         }
     }
     if ( m_scanning )
@@ -391,6 +494,16 @@ void KeyframeIndex::setError( const QString &_text )
         m_errorString = _text;
         emit scanningChanged();
     }
+}
+
+qint64 KeyframeIndex::largestGap( const QVector<qint64> &_times )
+{
+    qint64 largest = 0;
+    for ( int i = 1; i < _times.size(); ++i )
+    {
+        largest = qMax( largest, _times.at( i ) - _times.at( i - 1 ) );
+    }
+    return largest;
 }
 
 KeyframeIndex::SnapshotPointer KeyframeIndex::scanFile(
@@ -514,14 +627,18 @@ KeyframeIndex::SnapshotPointer KeyframeIndex::scanFile(
         if ( percent != state.percent )
         {
             state.percent = percent;
-            QVector<qint64> times;
+            ScanResult report;
             {
                 QMutexLocker locker( &state.mutex );
-                times = state.times;
+                report.times = state.times;
+                report.pts = state.pts;
+                report.durationMs = state.lastPictureEndMs;
+                report.largestGapMs = largestGap( state.times );
             }
+            report.percent = percent;
             if ( _progress )
             {
-                _progress( times, percent, false );
+                _progress( report );
             }
         }
     }
@@ -531,11 +648,15 @@ KeyframeIndex::SnapshotPointer KeyframeIndex::scanFile(
     gst_object_unref( pipeline );
 
     QVector<qint64> times;
+    QVector<qint64> pts;
     bool haveVideoPad = false;
+    qint64 lastPictureEndMs = -1;
     {
         QMutexLocker locker( &state.mutex );
         times = state.times;
+        pts = state.pts;
         haveVideoPad = state.haveVideoPad;
+        lastPictureEndMs = state.lastPictureEndMs;
     }
 
     if ( cancelled )
@@ -554,10 +675,23 @@ KeyframeIndex::SnapshotPointer KeyframeIndex::scanFile(
         return result;
     }
     result->times = times;
+    result->pts = pts;
     result->complete = true;
+    // The exact duration of the file: the end of the last picture. A
+    // container without an index only reports an estimate, which is often
+    // too short and makes the handle of the slider drift.
+    result->durationMs = ( lastPictureEndMs > 0 ) ? lastPictureEndMs : 0;
+    result->largestGapMs = largestGap( times );
     if ( _progress )
     {
-        _progress( times, 100, true );
+        ScanResult report;
+        report.times = times;
+        report.pts = pts;
+        report.percent = 100;
+        report.complete = true;
+        report.durationMs = result->durationMs;
+        report.largestGapMs = result->largestGapMs;
+        _progress( report );
     }
     return result;
 }
@@ -580,7 +714,9 @@ QString KeyframeIndex::cachePath( const QString &_filePath )
 }
 
 bool KeyframeIndex::writeCache( const QString &_filePath,
-                                const QVector<qint64> &_times )
+                                const QVector<qint64> &_times,
+                                const QVector<qint64> &_pts,
+                                qint64 _durationMs )
 {
     QFileInfo video( _filePath );
     QFile file( cachePath( _filePath ) );
@@ -594,16 +730,26 @@ bool KeyframeIndex::writeCache( const QString &_filePath,
     stream.setVersion( QDataStream::Qt_5_12 );
     stream << static_cast<qint64>( video.size() );
     stream << static_cast<qint64>( video.lastModified().toMSecsSinceEpoch() );
+    stream << static_cast<qint64>( _durationMs );
     stream << static_cast<qint32>( _times.size() );
     for ( qint64 time : _times )
     {
         stream << time;
     }
+    // The raw timestamps follow. A cache file of an older version does
+    // not have them, so the index then only knows the times.
+    stream << static_cast<qint32>( _pts.size() );
+    for ( qint64 pts : _pts )
+    {
+        stream << pts;
+    }
     return file.flush();
 }
 
 bool KeyframeIndex::readCache( const QString &_filePath,
-                               QVector<qint64> &times_ )
+                               QVector<qint64> &times_,
+                               QVector<qint64> &pts_,
+                               qint64 &durationMs_ )
 {
     QFileInfo video( _filePath );
     QFile file( cachePath( _filePath ) );
@@ -622,8 +768,9 @@ bool KeyframeIndex::readCache( const QString &_filePath,
     stream.setVersion( QDataStream::Qt_5_12 );
     qint64 size = 0;
     qint64 modified = 0;
+    qint64 durationMs = 0;
     qint32 count = 0;
-    stream >> size >> modified >> count;
+    stream >> size >> modified >> durationMs >> count;
     if ( stream.status() != QDataStream::Ok || count < 0 )
     {
         return false;
@@ -648,6 +795,32 @@ bool KeyframeIndex::readCache( const QString &_filePath,
         }
         times.append( time );
     }
+
+    // The raw timestamps are optional: a cache file without them is still
+    // useful, the index then only knows the times of the keyframes.
+    QVector<qint64> pts;
+    qint32 ptsCount = 0;
+    if ( stream.status() == QDataStream::Ok )
+    {
+        stream >> ptsCount;
+        if ( stream.status() == QDataStream::Ok && ptsCount >= 0 )
+        {
+            pts.reserve( ptsCount );
+            for ( qint32 i = 0; i < ptsCount; ++i )
+            {
+                qint64 value = 0;
+                stream >> value;
+                if ( stream.status() != QDataStream::Ok )
+                {
+                    break;
+                }
+                pts.append( value );
+            }
+        }
+    }
+
     times_ = times;
+    pts_ = pts;
+    durationMs_ = durationMs;
     return true;
 }
