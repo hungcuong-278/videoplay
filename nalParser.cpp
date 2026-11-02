@@ -19,9 +19,21 @@ int NalParser::codecFromCaps( GstCaps *_caps )
     return CODEC_OTHER;
 }
 
-int NalParser::lengthSizeFromCaps( GstCaps *_caps )
+const char *NalParser::codecName( int _codec )
 {
-    if ( _caps == nullptr || gst_caps_is_empty( _caps ) )
+    switch ( _codec )
+    {
+    case CODEC_H264:
+        return "H.264";
+    case CODEC_H265:
+        return "H.265";
+    default:
+        return "unknown";
+    }
+}
+
+int NalParser::lengthSizeFromCaps( GstCaps *_caps )
+{    if ( _caps == nullptr || gst_caps_is_empty( _caps ) )
     {
         return 0;
     }

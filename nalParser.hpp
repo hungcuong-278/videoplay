@@ -39,6 +39,13 @@ public:
     static int codecFromCaps( GstCaps *_caps );
 
     /*!
+     * \brief Returns the name of a codec.
+     * \param _codec One of the CODEC_ values.
+     * \return Name of the codec, "unknown" for an unknown one.
+     */
+    static const char *codecName( int _codec );
+
+    /*!
      * \brief Returns the size of the NAL length prefix of a stream.
      *
      * A byte stream (MPEG-TS, elementary streams) separates its NAL units

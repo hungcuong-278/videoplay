@@ -36,6 +36,9 @@ ApplicationWindow {
     readonly property int jumpMs: 5000
     readonly property var rates: [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
 
+    // The technical overlay on the picture, switched with the O key.
+    property bool showOverlay: false
+
     FileDialog {
         id: openDialog
         title: "Open video"
@@ -82,6 +85,12 @@ ApplicationWindow {
         onActivated: videoPlayer.stepForward()
     }
 
+    // Switch the technical overlay on the picture on and off.
+    Shortcut {
+        sequence: "O"
+        onActivated: root.showOverlay = !root.showOverlay
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -112,6 +121,55 @@ ApplicationWindow {
                     text: videoPlayer.errorString !== ""
                           ? videoPlayer.errorString
                           : "Open a video to start"
+                }
+            }
+
+            // Technical overlay on the picture. It is switched on and
+            // off with the O key, so the picture stays clean when the
+            // information is not needed.
+            Rectangle {
+                id: overlay
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.margins: 10
+                width: overlayText.implicitWidth + 20
+                height: overlayText.implicitHeight + 14
+                color: "#c0000000"
+                radius: 4
+                visible: root.showOverlay
+                          && videoPlayer.source !== ""
+
+                Text {
+                    id: overlayText
+                    anchors.centerIn: parent
+                    color: "#e8f0ff"
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    lineHeight: 1.25
+                    text: {
+                        var info = videoPlayer.videoInfo
+                        var lines = []
+                        lines.push("ID      "
+                                  + (videoPlayer.frameId < 0
+                                     ? "---------"
+                                     : padId(videoPlayer.frameId)))
+                        lines.push("PTS     "
+                                  + formatTime(Math.max(0,
+                                                        videoPlayer.frameTime)))
+                        lines.push("PAN     " + (row.found ? row.pan : "-"))
+                        lines.push("TILT    " + (row.found ? row.tilt : "-"))
+                        lines.push("MODE    " + (row.found ? row.mode : "-"))
+                        lines.push("SPEED   " + videoPlayer.rate + "x")
+                        lines.push("CODEC   " + (info.codec || "unknown"))
+                        lines.push("SIZE    "
+                                  + (info.width ? info.width : "?")
+                                  + " x "
+                                  + (info.height ? info.height : "?"))
+                        lines.push("FPS     "
+                                  + (info.fps ? info.fps.toFixed(3) : "?"))
+                        lines.push("DEC BUF " + videoPlayer.decoderBuffers)
+                        return lines.join("\n")
+                    }
                 }
             }
         }

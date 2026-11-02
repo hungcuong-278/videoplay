@@ -371,6 +371,20 @@ quint64 VideoPlayer::decoderBuffers() const
     return m_decoderBuffers.load();
 }
 
+QVariantMap VideoPlayer::videoInfo() const
+{
+    QVariantMap info = m_videoInfo;
+    QString codec;
+    {
+        QMutexLocker locker( &m_codecMutex );
+        codec = m_videoCodec;
+    }
+    // The name of the codec is written by a streaming thread, so it can
+    // be newer than the rest of the map.
+    info.insert( "codec", codec.isEmpty() ? QString( "unknown" ) : codec );
+    return info;
+}
+
 void VideoPlayer::closePipeline()
 {
     m_positionTimer.stop();
@@ -532,6 +546,7 @@ void VideoPlayer::handleBusMessage( quint64 _generation,
         updateSeekable();
         updateDuration();
         updatePosition();
+        updateVideoInfo();
         onSeekDone();
         break;
     }
@@ -695,6 +710,57 @@ void VideoPlayer::updateNominalFrameDuration()
                    / GST_VIDEO_INFO_FPS_N( &info ) );
     }
     gst_caps_unref( caps );
+}
+
+void VideoPlayer::updateVideoInfo()
+{
+    if ( m_pipeline == nullptr || m_appSink == nullptr )
+    {
+        return;
+    }
+
+    QVariantMap info;
+    GstPad *pad = gst_element_get_static_pad( m_appSink, "sink" );
+    GstCaps *caps = gst_pad_get_current_caps( pad );
+    gst_object_unref( pad );
+    if ( caps != nullptr )
+    {
+        // The codec is not part of the caps of the raw picture, so it is
+        // taken from the caps that the decoder negotiated.
+        GstStructure *structure = gst_caps_get_structure( caps, 0 );
+        if ( structure != nullptr )
+        {
+            GstVideoInfo videoInfo;
+            if ( gst_video_info_from_caps( &videoInfo, caps ) )
+            {
+                info.insert( "width", GST_VIDEO_INFO_WIDTH( &videoInfo ) );
+                info.insert( "height", GST_VIDEO_INFO_HEIGHT( &videoInfo ) );
+                if ( GST_VIDEO_INFO_FPS_N( &videoInfo ) > 0 )
+                {
+                    double fps = static_cast<double>(
+                        GST_VIDEO_INFO_FPS_N( &videoInfo ) )
+                                 / GST_VIDEO_INFO_FPS_D( &videoInfo );
+                    info.insert( "fps", fps );
+                }
+            }
+        }
+        gst_caps_unref( caps );
+    }
+
+    QString codec;
+    {
+        QMutexLocker locker( &m_codecMutex );
+        codec = m_videoCodec;
+    }
+    codec = codec.isEmpty() ? QString( "unknown" ) : codec;
+    info.insert( "codec", codec );
+
+    if ( info == m_videoInfo )
+    {
+        return;
+    }
+    m_videoInfo = info;
+    emit videoInfoChanged();
 }
 
 void VideoPlayer::onSeekDone()
@@ -1216,6 +1282,22 @@ void VideoPlayer::configureGate( DecoderGate *_gate, GstCaps *_caps )
 {
     // The parser recognises the codec and the way the NAL units are
     // separated, so the gate and the keyframe index always agree.
-    _gate->codec = NalParser::codecFromCaps( _caps );
+    int codec = NalParser::codecFromCaps( _caps );
+    _gate->codec = codec;
     _gate->lengthSize = NalParser::lengthSizeFromCaps( _caps );
+
+    // The name of the codec is shown in the overlay. The gate lives on a
+    // streaming thread, so the name is written to an atomic string
+    // holder and read by the GUI thread.
+    QString name = QString::fromLatin1( NalParser::codecName( codec ) );
+    QMutexLocker locker( &m_codecMutex );
+    if ( m_videoCodec != name )
+    {
+        m_videoCodec = name;
+        // The GUI thread is told through a queued call, because the
+        // streaming thread must not touch the properties of the player.
+        QMetaObject::invokeMethod(
+            this, [this]() { emit videoInfoChanged(); },
+            Qt::QueuedConnection );
+    }
 }

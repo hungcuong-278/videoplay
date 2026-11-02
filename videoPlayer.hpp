@@ -11,6 +11,7 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QElapsedTimer>
+#include <QVariantMap>
 
 #include <cstring>
 
@@ -59,6 +60,7 @@ class VideoPlayer : public QObject
                 NOTIFY frameReady )
     Q_PROPERTY( quint64 decoderBuffers READ decoderBuffers
                 NOTIFY decoderBuffersChanged )
+    Q_PROPERTY( QVariantMap videoInfo READ videoInfo NOTIFY videoInfoChanged )
 
 public:
     /*!
@@ -228,6 +230,14 @@ public:
      */
     quint64 decoderBuffers() const;
 
+    /*!
+     * \brief Returns the properties of the opened video.
+     *
+     * The map holds "codec", "width", "height" and "fps", as far as
+     * they are known.
+     */
+    QVariantMap videoInfo() const;
+
 signals:
     void playingChanged();
     void positionChanged();
@@ -239,6 +249,7 @@ signals:
     void seekableChanged();
     void useKeyframeIndexChanged();
     void decoderBuffersChanged();
+    void videoInfoChanged();
 
 private:
     /*!
@@ -263,6 +274,7 @@ private:
     void startSeek( qint64 _positionMs, bool _accurate );
     void updateEntryPoint( qint64 _positionMs, bool _accurate );
     void updateNominalFrameDuration();
+    void updateVideoInfo();
     void onSeekDone();
     void updateSeekable();
 
@@ -402,6 +414,12 @@ private:
     // cost of a seek. It is written by the streaming threads, so it is
     // atomic.
     std::atomic<quint64> m_decoderBuffers;
+    // The properties of the opened video, shown in the overlay.
+    QVariantMap m_videoInfo;
+    // The name of the codec, written by the streaming threads that
+    // negotiate the caps, read by the GUI thread.
+    QString m_videoCodec;
+    mutable QMutex m_codecMutex;
 };
 
 #endif // VIDEOPLAYER_HPP
