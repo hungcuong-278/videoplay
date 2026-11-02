@@ -1,2 +1,12 @@
 build/
 *.pro.user
+
+# Videos and their metadata tables never belong in the repository.
+# They are large, and the table of a video is only useful together
+# with the video itself.
+*.mp4
+*.ts
+*.mkv
+*.avi
+*.vmpidx
+*.csv
